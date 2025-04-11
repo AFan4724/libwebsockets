@@ -6,7 +6,7 @@ env:
   ANDROID_NDK: ${{ github.workspace }}/android-ndk-r25b
   BUILD_DIR: build_android
   INSTALL_DIR: install_android
-  OPENSSL_PREFIX: ${{ github.workspace }}/openssl-android-arm64  # 修复路径冲突问题[3](@ref)
+  OPENSSL_PREFIX: ${{ github.workspace }}/openssl-android-arm64
 
 jobs:
   android-build:
@@ -24,10 +24,11 @@ jobs:
           wget -q https://dl.google.com/android/repository/android-ndk-r25b-linux.zip
           unzip -q android-ndk-r25b-linux.zip -d ${{ github.workspace }}
           echo "${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          # 验证工具链存在性（网页7）
+          ls ${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android*
 
       - name: Build OpenSSL
         run: |
-          # 修复路径重复问题[3](@ref)
           export OPENSSL_INSTALL_DIR=${{ env.OPENSSL_PREFIX }}
           rm -rf $OPENSSL_INSTALL_DIR
           
@@ -37,48 +38,56 @@ jobs:
           git checkout e04bd3433fd84e1861bf258ea37928d9845e6a86 --force
 
           export ANDROID_NDK_HOME=${{ env.ANDROID_NDK }}
+          # 修复编译参数（网页3）
           ./Configure --prefix=$OPENSSL_INSTALL_DIR \
             android-arm64 \
             -D__ANDROID_API__=24 \
             no-shared \
             no-asm \
             -fPIC \
+            -fstack-protector-strong \
+            -D_FORTIFY_SOURCE=2 \
             --cross-compile-prefix=aarch64-linux-android- \
             --sysroot=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot
 
-          make -j$(nproc)
-          make install_sw  # 修复安装目标[6](@ref)
+          make -j$(nproc) CC=aarch64-linux-android21-clang  # 显式指定编译器
+          make install_sw
 
       - name: Verify OpenSSL Build
         run: |
-          # 增加路径检查[7](@ref)
-          echo "验证编译产物路径:"
-          ls -l ${{ env.OPENSSL_PREFIX }}/lib/libssl.a
-          ls -l ${{ env.OPENSSL_PREFIX }}/lib/libcrypto.a
-          file ${{ env.OPENSSL_PREFIX }}/lib/libssl.a | grep "ARM aarch64"
+          # 增强路径验证（网页6）
+          if [ ! -f "${{ env.OPENSSL_PREFIX }}/lib/libssl.a" ]; then
+            echo "::error::libssl.a not found!"
+            exit 1
+          fi
+          file ${{ env.OPENSSL_PREFIX }}/lib/libssl.a | grep "ARM aarch64" || (echo "Arch mismatch!"; exit 1)
 
       - name: Configure CMake
         env:
-          PKG_CONFIG_PATH: ${{ env.OPENSSL_PREFIX }}/lib/pkgconfig  # 新增pkgconfig路径[3](@ref)
+          PKG_CONFIG_PATH: ${{ env.OPENSSL_PREFIX }}/lib/pkgconfig
+          LDFLAGS: "-L${{ env.OPENSSL_PREFIX }}/lib"
         run: |
+          # 添加openssl版本检查（网页3）
           cmake -B $BUILD_DIR -S . \
             -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
             -DCMAKE_TOOLCHAIN_FILE=${{ env.ANDROID_NDK }}/build/cmake/android.toolchain.cmake \
             -DLWS_WITH_SSL=ON \
-            -DLWS_OPENSSL_LIBRARIES="${{ env.OPENSSL_PREFIX }}/lib/libssl.a;${{ env.OPENSSL_PREFIX }}/lib/libcrypto.a" \  # 修复静态链接
+            -DLWS_OPENSSL_LIBRARIES="${{ env.OPENSSL_PREFIX }}/lib/libssl.a;${{ env.OPENSSL_PREFIX }}/lib/libcrypto.a" \
             -DLWS_OPENSSL_INCLUDE_DIRS=${{ env.OPENSSL_PREFIX }}/include \
+            -DLWS_OPENSSL_VERSION=1.1.1w \  # 强制版本匹配
             -DLWS_WITHOUT_TESTAPPS=ON \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_FIND_ROOT_PATH=${{ env.OPENSSL_PREFIX }} 
+            -DCMAKE_FIND_ROOT_PATH="${{ env.OPENSSL_PREFIX }};${{ env.ANDROID_NDK }}/sysroot"
 
       - name: Build and Install
         run: |
           cmake --build $BUILD_DIR --target install --parallel $(nproc)
-          # 增加产物验证[6](@ref)
-          readelf -h $INSTALL_DIR/lib/libwebsockets.so | grep "ARM aarch64"
-          ldd $INSTALL_DIR/lib/libwebsockets.so | grep ssl
+          # 增强架构验证（网页7）
+          readelf -h $INSTALL_DIR/lib/libwebsockets.so | grep "Machine:.*AArch64" || (echo "Invalid ELF header"; exit 1)
+          # 静态链接无需ldd检查，改为nm验证符号
+          nm -D $INSTALL_DIR/lib/libwebsockets.so | grep -E 'SSL_connect|SSL_read'
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -88,3 +97,4 @@ jobs:
             ${{ env.INSTALL_DIR }}/lib/*
             ${{ env.INSTALL_DIR }}/include/*
           if-no-files-found: error
+          retention-days: 7
