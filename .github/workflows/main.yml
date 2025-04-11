@@ -1,122 +1,56 @@
-name: Android NDK Build (ARM64-v8a)
+name: Android arm64-v8a Build
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:
+on: [push, pull_request]
+
+env:
+  ANDROID_NDK: ${{ github.workspace }}/android-ndk-r25b
+  BUILD_DIR: build_android
+  INSTALL_DIR: install_android
 
 jobs:
-  build-arm64-v8a:
+  android-build:
+    name: Android arm64-v8a
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
-    
-    - name: Set up JDK 17
-      uses: actions/setup-java@v3
-      with:
-        java-version: '17'
-        distribution: 'temurin'
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Android SDK
-      uses: android-actions/setup-android@v2
+      - name: Setup NDK
+        run: |
+          wget https://dl.google.com/android/repository/android-ndk-r25b-linux.zip
+          unzip android-ndk-r25b-linux.zip -d ${{ github.workspace }}
 
-    - name: Setup Android NDK
-      id: setup-ndk
-      uses: nttld/setup-ndk@v1
-      with:
-        ndk-version: r23c
-        
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake wget git tar xutils-dev
+      - name: Build OpenSSL
+        run: |
+          git clone --branch OpenSSL_1_1_1w https://github.com/openssl/openssl.git
+          cd openssl
+          ./Configure android-arm64 -D__ANDROID_API__=24 no-asm shared no-async
+          make -j8
+          sudo make install
 
-    - name: Download and build OpenSSL for Android
-      run: |
-        cd ${{ github.workspace }}
-        git clone https://github.com/openssl/openssl.git -b OpenSSL_1_1_1-stable
-        cd openssl
-        
-        # Setup environment
-        export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
-        export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-        export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
-        
-        # Build for arm64-v8a with optimizations
-        mkdir -p ${{ github.workspace }}/openssl-build/arm64-v8a
-        ./Configure android-arm64 -D__ANDROID_API__=21 --prefix=${{ github.workspace }}/openssl-build/arm64-v8a no-shared no-hw
-        
-        make -j$(nproc)
-        make install_sw
+      - name: Configure CMake
+        env:
+          TOOLCHAIN: ${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64
+        run: |
+          cmake -B $BUILD_DIR -S . \
+            -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_TOOLCHAIN_FILE=${{ env.ANDROID_NDK }}/build/cmake/android.toolchain.cmake \
+            -DLWS_WITH_SSL=ON \
+            -DLWS_OPENSSL_LIBRARIES=/usr/local/lib/libssl.so \
+            -DLWS_OPENSSL_INCLUDE_DIRS=/usr/local/include/openssl \
+            -DLWS_WITHOUT_TESTAPPS=ON \
+            -DCMAKE_BUILD_TYPE=Release
 
-    - name: Download and build zlib for Android
-      run: |
-        cd ${{ github.workspace }}
-        git clone https://github.com/madler/zlib.git
-        cd zlib
-        
-        # Setup environment
-        export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
-        
-        mkdir -p ${{ github.workspace }}/zlib-build/arm64-v8a
-        mkdir -p build-arm64-v8a
-        cd build-arm64-v8a
-        
-        cmake .. \
-          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-          -DANDROID_ABI=arm64-v8a \
-          -DANDROID_ARM_NEON=ON \
-          -DANDROID_PLATFORM=android-21 \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/zlib-build/arm64-v8a
-        
-        make -j$(nproc)
-        make install
+      - name: Build and Install
+        run: |
+          cmake --build $BUILD_DIR --target install --parallel $(nproc)
 
-    - name: Configure and Build libwebsockets for Android
-      env:
-        ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-      run: |
-        mkdir -p build-android-arm64-v8a
-        cd build-android-arm64-v8a
-        
-        cmake \
-          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-          -DANDROID_ABI=arm64-v8a \
-          -DANDROID_ARM_NEON=ON \
-          -DANDROID_PLATFORM=android-21 \
-          -DANDROID_STL=c++_shared \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DLWS_WITH_SSL=ON \
-          -DLWS_OPENSSL_INCLUDE_DIRS=${{ github.workspace }}/openssl-build/arm64-v8a/include \
-          -DLWS_OPENSSL_LIBRARIES="${{ github.workspace }}/openssl-build/arm64-v8a/lib/libssl.a;${{ github.workspace }}/openssl-build/arm64-v8a/lib/libcrypto.a" \
-          -DLWS_WITH_ZLIB=ON \
-          -DZLIB_INCLUDE_DIR=${{ github.workspace }}/zlib-build/arm64-v8a/include \
-          -DZLIB_LIBRARY=${{ github.workspace }}/zlib-build/arm64-v8a/lib/libz.a \
-          -DLWS_WITHOUT_TESTAPPS=ON \
-          -DLWS_WITHOUT_TEST_SERVER=ON \
-          -DLWS_WITHOUT_TEST_PING=ON \
-          -DLWS_WITHOUT_TEST_CLIENT=ON \
-          -DLWS_IPV6=ON \
-          -DLWS_WITH_MINIMAL_EXAMPLES=OFF \
-          -DLWS_WITHOUT_EXTENSIONS=OFF \
-          ..
-          
-        make -j$(nproc)
-        
-    - name: Archive library artifacts
-      run: |
-        cd ${{ github.workspace }}
-        mkdir -p libwebsockets-android-arm64-v8a
-        cp -r build-android-arm64-v8a/lib/*.so build-android-arm64-v8a/lib/*.a libwebsockets-android-arm64-v8a/
-        tar -czvf libwebsockets-android-arm64-v8a.tar.gz libwebsockets-android-arm64-v8a/
-        
-    - name: Upload build artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: libwebsockets-android-arm64-v8a
-        path: libwebsockets-android-arm64-v8a.tar.gz 
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-arm64-v8a
+          path: |
+            ${{ env.INSTALL_DIR }}/lib/*
+            ${{ env.INSTALL_DIR }}/include/*
