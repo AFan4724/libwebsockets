@@ -6,7 +6,7 @@ env:
   ANDROID_NDK: ${{ github.workspace }}/android-ndk-r25b
   BUILD_DIR: build_android
   INSTALL_DIR: install_android
-  OPENSSL_PREFIX: ${{ github.workspace }}/openssl-android  # 网页3建议的独立安装目录
+  OPENSSL_PREFIX: ${{ github.workspace }}/openssl-android-arm64  # 修复路径冲突问题[3](@ref)
 
 jobs:
   android-build:
@@ -23,36 +23,43 @@ jobs:
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r25b-linux.zip
           unzip -q android-ndk-r25b-linux.zip -d ${{ github.workspace }}
-          echo "${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH  # 网页3路径注入方法
+          echo "${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
       - name: Build OpenSSL
         run: |
-          git config --global http.sslVerify "false"  # 解决SSL证书问题
+          # 修复路径重复问题[3](@ref)
+          export OPENSSL_INSTALL_DIR=${{ env.OPENSSL_PREFIX }}
+          rm -rf $OPENSSL_INSTALL_DIR
+          
+          git config --global http.sslVerify "false"
           git clone --depth 1 --branch OpenSSL_1_1_1w https://github.com/openssl/openssl.git
           cd openssl
-          git checkout e04bd3433fd84e1861bf258ea37928d9845e6a86 --force  # 强制切换有效提交
+          git checkout e04bd3433fd84e1861bf258ea37928d9845e6a86 --force
 
-          # 网页3推荐的交叉编译参数
           export ANDROID_NDK_HOME=${{ env.ANDROID_NDK }}
-          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} \
+          ./Configure --prefix=$OPENSSL_INSTALL_DIR \
             android-arm64 \
             -D__ANDROID_API__=24 \
             no-shared \
             no-asm \
             -fPIC \
+            --cross-compile-prefix=aarch64-linux-android- \
             --sysroot=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot
 
           make -j$(nproc)
-          make install_sw  # 仅安装软件组件
+          make install_sw  # 修复安装目标[6](@ref)
 
       - name: Verify OpenSSL Build
         run: |
-          ls -lR ${{ env.OPENSSL_PREFIX }}
-          file ${{ env.OPENSSL_PREFIX }}/lib/libssl.a | grep "ARM aarch64"  # 验证架构
+          # 增加路径检查[7](@ref)
+          echo "验证编译产物路径:"
+          ls -l ${{ env.OPENSSL_PREFIX }}/lib/libssl.a
+          ls -l ${{ env.OPENSSL_PREFIX }}/lib/libcrypto.a
+          file ${{ env.OPENSSL_PREFIX }}/lib/libssl.a | grep "ARM aarch64"
 
       - name: Configure CMake
         env:
-          TOOLCHAIN: ${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64
+          PKG_CONFIG_PATH: ${{ env.OPENSSL_PREFIX }}/lib/pkgconfig  # 新增pkgconfig路径[3](@ref)
         run: |
           cmake -B $BUILD_DIR -S . \
             -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR \
@@ -60,22 +67,24 @@ jobs:
             -DANDROID_PLATFORM=android-24 \
             -DCMAKE_TOOLCHAIN_FILE=${{ env.ANDROID_NDK }}/build/cmake/android.toolchain.cmake \
             -DLWS_WITH_SSL=ON \
-            -DLWS_OPENSSL_LIBRARIES=${{ env.OPENSSL_PREFIX }}/lib/libssl.a  # 静态链接
+            -DLWS_OPENSSL_LIBRARIES="${{ env.OPENSSL_PREFIX }}/lib/libssl.a;${{ env.OPENSSL_PREFIX }}/lib/libcrypto.a" \  # 修复静态链接
             -DLWS_OPENSSL_INCLUDE_DIRS=${{ env.OPENSSL_PREFIX }}/include \
             -DLWS_WITHOUT_TESTAPPS=ON \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_FIND_ROOT_PATH=${{ env.OPENSSL_PREFIX }}  # 网页6关键配置
+            -DCMAKE_FIND_ROOT_PATH=${{ env.OPENSSL_PREFIX }} 
 
       - name: Build and Install
         run: |
           cmake --build $BUILD_DIR --target install --parallel $(nproc)
-          readelf -h $INSTALL_DIR/lib/libwebsockets.so  # 验证ELF头信息
+          # 增加产物验证[6](@ref)
+          readelf -h $INSTALL_DIR/lib/libwebsockets.so | grep "ARM aarch64"
+          ldd $INSTALL_DIR/lib/libwebsockets.so | grep ssl
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4  # 必须升级到v4版本
+        uses: actions/upload-artifact@v4
         with:
           name: android-arm64-v8a
           path: |
             ${{ env.INSTALL_DIR }}/lib/*
             ${{ env.INSTALL_DIR }}/include/*
-          if-no-files-found: error  # 严格检查文件存在性
+          if-no-files-found: error
