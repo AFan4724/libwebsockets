@@ -6,29 +6,76 @@ env:
   ANDROID_NDK: ${{ github.workspace }}/android-ndk-r25b
   BUILD_DIR: build_android
   INSTALL_DIR: install_android
+  OPENSSL_PREFIX: ${{ github.workspace }}/openssl-android  # 网页3建议的独立安装目录
 
 jobs:
   android-build:
+    name: Android arm64-v8a
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup NDK
         run: |
-          wget https://dl.google.com/android/repository/android-ndk-r25b-linux.zip
-          unzip android-ndk-r25b-linux.zip -d ${{ github.workspace }}
-          echo "${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          wget -q https://dl.google.com/android/repository/android-ndk-r25b-linux.zip
+          unzip -q android-ndk-r25b-linux.zip -d ${{ github.workspace }}
+          echo "${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH  # 网页3路径注入方法
 
       - name: Build OpenSSL
         run: |
-          git config --global http.sslVerify "false"
-          git clone https://github.com/openssl/openssl.git
+          git config --global http.sslVerify "false"  # 解决SSL证书问题
+          git clone --depth 1 --branch OpenSSL_1_1_1w https://github.com/openssl/openssl.git
           cd openssl
-          git checkout e04bd3433fd84e1861bf258ea37928d9845e6a86
-          ./Configure --prefix=${{ github.workspace }}/openssl-android android-arm64 -D__ANDROID_API__=24
-          make -j8
-          make install
+          git checkout e04bd3433fd84e1861bf258ea37928d9845e6a86 --force  # 强制切换有效提交
 
-      - name: Verify OpenSSL
+          # 网页3推荐的交叉编译参数
+          export ANDROID_NDK_HOME=${{ env.ANDROID_NDK }}
+          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} \
+            android-arm64 \
+            -D__ANDROID_API__=24 \
+            no-shared \
+            no-asm \
+            -fPIC \
+            --sysroot=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+
+          make -j$(nproc)
+          make install_sw  # 仅安装软件组件
+
+      - name: Verify OpenSSL Build
         run: |
-          ls ${{ github.workspace }}/openssl-android/lib/libssl.so
-          ls ${{ github.workspace }}/openssl-android/include/openssl
+          ls -lR ${{ env.OPENSSL_PREFIX }}
+          file ${{ env.OPENSSL_PREFIX }}/lib/libssl.a | grep "ARM aarch64"  # 验证架构
+
+      - name: Configure CMake
+        env:
+          TOOLCHAIN: ${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64
+        run: |
+          cmake -B $BUILD_DIR -S . \
+            -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_TOOLCHAIN_FILE=${{ env.ANDROID_NDK }}/build/cmake/android.toolchain.cmake \
+            -DLWS_WITH_SSL=ON \
+            -DLWS_OPENSSL_LIBRARIES=${{ env.OPENSSL_PREFIX }}/lib/libssl.a  # 静态链接
+            -DLWS_OPENSSL_INCLUDE_DIRS=${{ env.OPENSSL_PREFIX }}/include \
+            -DLWS_WITHOUT_TESTAPPS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_FIND_ROOT_PATH=${{ env.OPENSSL_PREFIX }}  # 网页6关键配置
+
+      - name: Build and Install
+        run: |
+          cmake --build $BUILD_DIR --target install --parallel $(nproc)
+          readelf -h $INSTALL_DIR/lib/libwebsockets.so  # 验证ELF头信息
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4  # 必须升级到v4版本
+        with:
+          name: android-arm64-v8a
+          path: |
+            ${{ env.INSTALL_DIR }}/lib/*
+            ${{ env.INSTALL_DIR }}/include/*
+          if-no-files-found: error  # 严格检查文件存在性
