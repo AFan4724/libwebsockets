@@ -11,9 +11,11 @@ jobs:
   android-build:
     name: Android arm64-v8a
     runs-on: ubuntu-latest
+    permissions:  # 添加最小权限[4](@ref)
+      contents: write
+      packages: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup NDK
         run: |
@@ -24,9 +26,9 @@ jobs:
         run: |
           git clone --branch OpenSSL_1_1_1w https://github.com/openssl/openssl.git
           cd openssl
-          ./Configure android-arm64 -D__ANDROID_API__=24 no-asm shared no-async
+          ./Configure --prefix=${{ github.workspace }}/openssl-android android-arm64 -D__ANDROID_API__=24
           make -j8
-          sudo make install
+          make install
 
       - name: Configure CMake
         env:
@@ -38,8 +40,8 @@ jobs:
             -DANDROID_PLATFORM=android-24 \
             -DCMAKE_TOOLCHAIN_FILE=${{ env.ANDROID_NDK }}/build/cmake/android.toolchain.cmake \
             -DLWS_WITH_SSL=ON \
-            -DLWS_OPENSSL_LIBRARIES=/usr/local/lib/libssl.so \
-            -DLWS_OPENSSL_INCLUDE_DIRS=/usr/local/include/openssl \
+            -DLWS_OPENSSL_LIBRARIES=${{ github.workspace }}/openssl-android/lib/libssl.so \
+            -DLWS_OPENSSL_INCLUDE_DIRS=${{ github.workspace }}/openssl-android/include \
             -DLWS_WITHOUT_TESTAPPS=ON \
             -DCMAKE_BUILD_TYPE=Release
 
@@ -47,10 +49,14 @@ jobs:
         run: |
           cmake --build $BUILD_DIR --target install --parallel $(nproc)
 
+      - name: Verify build artifacts
+        run: ls -R ${{ env.INSTALL_DIR }}
+
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: android-arm64-v8a
           path: |
             ${{ env.INSTALL_DIR }}/lib/*
             ${{ env.INSTALL_DIR }}/include/*
+          include-hidden-files: true
