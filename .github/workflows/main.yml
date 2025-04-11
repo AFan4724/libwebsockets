@@ -1,0 +1,250 @@
+name: Android NDK Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-arm64-v8a:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+    
+    - name: Set up JDK 11
+      uses: actions/setup-java@v3
+      with:
+        java-version: '11'
+        distribution: 'temurin'
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v2
+
+    - name: Setup Android NDK
+      id: setup-ndk
+      uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r23c
+        
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake wget git tar xutils-dev
+
+    - name: Download and build OpenSSL for Android
+      run: |
+        cd ${{ github.workspace }}
+        git clone https://github.com/openssl/openssl.git -b OpenSSL_1_1_1-stable
+        cd openssl
+        
+        # Setup environment
+        export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
+        export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+        export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+        
+        # Build for arm64-v8a with optimizations
+        mkdir -p ${{ github.workspace }}/openssl-build/arm64-v8a
+        ./Configure android-arm64 -D__ANDROID_API__=21 --prefix=${{ github.workspace }}/openssl-build/arm64-v8a no-shared no-hw
+        
+        make -j$(nproc)
+        make install_sw
+
+    - name: Download and build zlib for Android
+      run: |
+        cd ${{ github.workspace }}
+        git clone https://github.com/madler/zlib.git
+        cd zlib
+        
+        # Setup environment
+        export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
+        
+        mkdir -p ${{ github.workspace }}/zlib-build/arm64-v8a
+        mkdir -p build-arm64-v8a
+        cd build-arm64-v8a
+        
+        cmake .. \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_ARM_NEON=ON \
+          -DANDROID_PLATFORM=android-21 \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/zlib-build/arm64-v8a
+        
+        make -j$(nproc)
+        make install
+
+    - name: Configure and Build libwebsockets for Android
+      env:
+        ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      run: |
+        mkdir -p build-android-arm64-v8a
+        cd build-android-arm64-v8a
+        
+        cmake \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_ARM_NEON=ON \
+          -DANDROID_PLATFORM=android-21 \
+          -DANDROID_STL=c++_shared \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLWS_WITH_SSL=ON \
+          -DLWS_OPENSSL_INCLUDE_DIRS=${{ github.workspace }}/openssl-build/arm64-v8a/include \
+          -DLWS_OPENSSL_LIBRARIES="${{ github.workspace }}/openssl-build/arm64-v8a/lib/libssl.a;${{ github.workspace }}/openssl-build/arm64-v8a/lib/libcrypto.a" \
+          -DLWS_WITH_ZLIB=ON \
+          -DZLIB_INCLUDE_DIR=${{ github.workspace }}/zlib-build/arm64-v8a/include \
+          -DZLIB_LIBRARY=${{ github.workspace }}/zlib-build/arm64-v8a/lib/libz.a \
+          -DLWS_WITHOUT_TESTAPPS=ON \
+          -DLWS_WITHOUT_TEST_SERVER=ON \
+          -DLWS_WITHOUT_TEST_PING=ON \
+          -DLWS_WITHOUT_TEST_CLIENT=ON \
+          -DLWS_IPV6=ON \
+          -DLWS_WITH_MINIMAL_EXAMPLES=OFF \
+          -DLWS_WITHOUT_EXTENSIONS=OFF \
+          ..
+          
+        make -j$(nproc)
+        
+    - name: Archive library artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: libwebsockets-android-arm64-v8a
+        path: |
+          build-android-arm64-v8a/lib/*.so
+          build-android-arm64-v8a/lib/*.a
+
+  build-other:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        abi: [armeabi-v7a, x86, x86_64]
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+    
+    - name: Set up JDK 11
+      uses: actions/setup-java@v3
+      with:
+        java-version: '11'
+        distribution: 'temurin'
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v2
+
+    - name: Setup Android NDK
+      id: setup-ndk
+      uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r23c
+        
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake wget git tar xutils-dev
+
+    - name: Download and build OpenSSL for Android
+      run: |
+        cd ${{ github.workspace }}
+        git clone https://github.com/openssl/openssl.git -b OpenSSL_1_1_1-stable
+        cd openssl
+        
+        # Setup environment
+        export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
+        export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+        export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+        
+        # Build for ${{ matrix.abi }}
+        mkdir -p ${{ github.workspace }}/openssl-build/${{ matrix.abi }}
+        
+        if [ "${{ matrix.abi }}" = "armeabi-v7a" ]; then
+          ./Configure android-arm -D__ANDROID_API__=16 --prefix=${{ github.workspace }}/openssl-build/${{ matrix.abi }}
+        elif [ "${{ matrix.abi }}" = "x86" ]; then
+          ./Configure android-x86 -D__ANDROID_API__=16 --prefix=${{ github.workspace }}/openssl-build/${{ matrix.abi }}
+        elif [ "${{ matrix.abi }}" = "x86_64" ]; then
+          ./Configure android-x86_64 -D__ANDROID_API__=21 --prefix=${{ github.workspace }}/openssl-build/${{ matrix.abi }}
+        fi
+        
+        make -j$(nproc)
+        make install_sw
+
+    - name: Download and build zlib for Android
+      run: |
+        cd ${{ github.workspace }}
+        git clone https://github.com/madler/zlib.git
+        cd zlib
+        
+        # Setup environment
+        export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
+        
+        mkdir -p ${{ github.workspace }}/zlib-build/${{ matrix.abi }}
+        mkdir -p build-${{ matrix.abi }}
+        cd build-${{ matrix.abi }}
+        
+        cmake .. \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=${{ matrix.abi }} \
+          -DANDROID_PLATFORM=android-21 \
+          -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/zlib-build/${{ matrix.abi }}
+        
+        make -j$(nproc)
+        make install
+
+    - name: Configure and Build libwebsockets for Android
+      env:
+        ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      run: |
+        mkdir -p build-android-${{ matrix.abi }}
+        cd build-android-${{ matrix.abi }}
+        
+        cmake \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=${{ matrix.abi }} \
+          -DANDROID_PLATFORM=android-21 \
+          -DANDROID_STL=c++_shared \
+          -DLWS_WITH_SSL=ON \
+          -DLWS_OPENSSL_INCLUDE_DIRS=${{ github.workspace }}/openssl-build/${{ matrix.abi }}/include \
+          -DLWS_OPENSSL_LIBRARIES="${{ github.workspace }}/openssl-build/${{ matrix.abi }}/lib/libssl.a;${{ github.workspace }}/openssl-build/${{ matrix.abi }}/lib/libcrypto.a" \
+          -DLWS_WITH_ZLIB=ON \
+          -DZLIB_INCLUDE_DIR=${{ github.workspace }}/zlib-build/${{ matrix.abi }}/include \
+          -DZLIB_LIBRARY=${{ github.workspace }}/zlib-build/${{ matrix.abi }}/lib/libz.a \
+          -DLWS_WITHOUT_TESTAPPS=ON \
+          -DLWS_WITHOUT_TEST_SERVER=ON \
+          -DLWS_WITHOUT_TEST_PING=ON \
+          -DLWS_WITHOUT_TEST_CLIENT=ON \
+          -DLWS_IPV6=ON \
+          ..
+          
+        make -j$(nproc)
+        
+    - name: Archive library artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: libwebsockets-android-${{ matrix.abi }}
+        path: |
+          build-android-${{ matrix.abi }}/lib/*.so
+          build-android-${{ matrix.abi }}/lib/*.a
+          
+  package-all:
+    needs: [build-arm64-v8a, build-other]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+          
+      - name: Package libraries
+        run: |
+          mkdir -p libwebsockets-android-libs
+          cp -r artifacts/* libwebsockets-android-libs/
+          
+      - name: Archive combined artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: libwebsockets-android-all
+          path: libwebsockets-android-libs 
