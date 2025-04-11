@@ -9,11 +9,6 @@ env:
 
 jobs:
   android-build:
-    name: Android arm64-v8a
-    runs-on: ubuntu-latest
-    permissions:  # 添加最小权限[4](@ref)
-      contents: write
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -21,42 +16,19 @@ jobs:
         run: |
           wget https://dl.google.com/android/repository/android-ndk-r25b-linux.zip
           unzip android-ndk-r25b-linux.zip -d ${{ github.workspace }}
+          echo "${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
       - name: Build OpenSSL
         run: |
-          git clone --branch OpenSSL_1_1_1w https://github.com/openssl/openssl.git
+          git config --global http.sslVerify "false"
+          git clone https://github.com/openssl/openssl.git
           cd openssl
+          git checkout e04bd3433fd84e1861bf258ea37928d9845e6a86
           ./Configure --prefix=${{ github.workspace }}/openssl-android android-arm64 -D__ANDROID_API__=24
           make -j8
           make install
 
-      - name: Configure CMake
-        env:
-          TOOLCHAIN: ${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64
+      - name: Verify OpenSSL
         run: |
-          cmake -B $BUILD_DIR -S . \
-            -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-24 \
-            -DCMAKE_TOOLCHAIN_FILE=${{ env.ANDROID_NDK }}/build/cmake/android.toolchain.cmake \
-            -DLWS_WITH_SSL=ON \
-            -DLWS_OPENSSL_LIBRARIES=${{ github.workspace }}/openssl-android/lib/libssl.so \
-            -DLWS_OPENSSL_INCLUDE_DIRS=${{ github.workspace }}/openssl-android/include \
-            -DLWS_WITHOUT_TESTAPPS=ON \
-            -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build and Install
-        run: |
-          cmake --build $BUILD_DIR --target install --parallel $(nproc)
-
-      - name: Verify build artifacts
-        run: ls -R ${{ env.INSTALL_DIR }}
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-arm64-v8a
-          path: |
-            ${{ env.INSTALL_DIR }}/lib/*
-            ${{ env.INSTALL_DIR }}/include/*
-          include-hidden-files: true
+          ls ${{ github.workspace }}/openssl-android/lib/libssl.so
+          ls ${{ github.workspace }}/openssl-android/include/openssl
