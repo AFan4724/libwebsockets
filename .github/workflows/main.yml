@@ -109,9 +109,14 @@ jobs:
         make -j$(nproc)
         
     - name: Archive library artifacts
-      uses: actions/upload-artifact@v2
+      run: |
+        cd ${{ github.workspace }}
+        mkdir -p libwebsockets-android-arm64-v8a
+        cp -r build-android-arm64-v8a/lib/*.so build-android-arm64-v8a/lib/*.a libwebsockets-android-arm64-v8a/
+        tar -czvf libwebsockets-android-arm64-v8a.tar.gz libwebsockets-android-arm64-v8a/
+        
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
       with:
         name: libwebsockets-android-arm64-v8a
-        path: |
-          build-android-arm64-v8a/lib/*.so
-          build-android-arm64-v8a/lib/*.a 
+        path: libwebsockets-android-arm64-v8a.tar.gz 
